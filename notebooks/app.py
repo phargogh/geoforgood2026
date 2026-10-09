@@ -79,9 +79,44 @@ def _(mo):
 
 @app.cell
 def _(crew, energy_meter, mo, prompt, results, run_button, setup_error):
+    import anywidget
+
     # The rolling "thinking" log: streams each planning/action/tool-call step as
     # the crew produces it (mo.output.append), so this cell's output IS the live
     # sidebar. The map/stats cells below react to `board` once this cell finishes.
+
+    class _FollowLog(anywidget.AnyWidget):
+        # Invisible; keeps the log's scroll area (its grid cell) pinned to the
+        # newest step as steps stream in. Scrolling up to read pauses it, and
+        # scrolling back to the bottom resumes. A widget because marimo won't
+        # run inline <script>s in HTML output.
+        _esm = """
+        function render({ el }) {
+          // Nearest scrollable ancestor, stepping out of the widget's shadow root.
+          let box = el;
+          while ((box = box.parentElement ?? box.getRootNode().host)) {
+            if (box === document.body) return;
+            if (/auto|scroll/.test(getComputedStyle(box).overflowY)) break;
+          }
+          if (!box) return;
+          let pinned = true;
+          const onScroll = () => {
+            pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+          };
+          const follow = () => {
+            if (pinned) box.scrollTop = box.scrollHeight;
+          };
+          const observer = new MutationObserver(follow);
+          observer.observe(box, { childList: true, subtree: true, characterData: true });
+          box.addEventListener("scroll", onScroll);
+          follow();
+          return () => {
+            observer.disconnect();
+            box.removeEventListener("scroll", onScroll);
+          };
+        }
+        export default { render };
+        """
 
     def _fmt(text, limit=400):
         text = "" if text is None else str(text)
@@ -121,6 +156,7 @@ def _(crew, energy_meter, mo, prompt, results, run_button, setup_error):
         board = results.current()
     else:
         results.reset()
+        mo.output.append(mo.ui.anywidget(_FollowLog()))
         mo.output.append(mo.md(f"### Running\n\n{prompt.value}"))
         mo.output.append(mo.md("---"))
         with energy_meter.measure(prompt.value):

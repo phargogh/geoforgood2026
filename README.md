@@ -45,7 +45,8 @@ marimo run notebooks/app.py       # read-only app view
 ```
 
 Type a prompt, click **Run crew**, and watch: a rolling "thinking" log in the
-side column streams each plan/step/tool-call as the crew works, while the
+side column streams each plan/step/tool-call as the crew works (staying
+scrolled to the newest entry unless you scroll up to read), while the
 central map and the stats table below it fill in once the run's model tool(s)
 report their layers/stats. The dashboard arrangement lives in
 `notebooks/layouts/app.grid.json`.

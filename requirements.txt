@@ -13,6 +13,7 @@ numpy>=1.26.0  # used directly by scripts/urban_nature_access.py
 # Env + reactive notebook
 python-dotenv>=1.0.0
 marimo>=0.9.0
+anywidget>=0.9.0  # used directly by notebooks/app.py (keeps the log scrolled to the bottom)
 pandas>=2.0.0
 
 # Web search + page fetch (example researcher agent)
