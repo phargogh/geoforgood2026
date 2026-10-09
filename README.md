@@ -50,6 +50,28 @@ central map and the stats table below it fill in once the run's model tool(s)
 report their layers/stats. The dashboard arrangement lives in
 `notebooks/layouts/app.grid.json`.
 
+### Energy use
+
+The **Energy** panel under the stats table shows the electricity this session
+has used: one row per run (plus setup), and a session total, refreshed after
+each run. It reads Apple Silicon's cumulative energy counters for the CPU,
+GPU, Neural Engine and DRAM (what `powermetrics` reports, but via IOReport,
+so no sudo), which makes each run's figure exact rather than sampled. Other
+apps running at the same time are included, so **above idle** subtracts the
+average draw measured between runs; with a local backend such as Ollama that
+difference is mostly inference. Not counted: the display, SSD, Wi-Fi, charger
+losses, and anything on Google's servers (Gemini, Earth Engine). On Intel
+Macs and Linux there are no counters to read: `measure()` becomes a no-op and
+the panel shows a warning instead. Outside the app:
+
+```python
+from natcap_agents import energy
+meter = energy.session_meter()
+with meter.measure("forest loss") as run:
+    crew.run("How much forest was lost in <region> since 2015?")
+print(f"{run.energy_wh:.2f} Wh, session {meter.session_wh:.2f} Wh")
+```
+
 ### Setup
 
 ```bash
@@ -104,6 +126,7 @@ natcap_agents/
   models.py       # VertexAIServerModel (google-genai; Vertex key / SA / Gemini API)
   safety.py       # authorized imports for the code-executing orchestrator
   results.py      # shared board: model tools publish layers/stats here
+  energy.py       # session_meter(): electricity used, per run and per session
   regions.py      # resolve_region() + the region_id registry (no bulky coords)
   project_tools.py # auto-loads tools/models/ (the project's own models)
   forge.py        # auto-loads tools/generated/ (Tool Smith output, if added)

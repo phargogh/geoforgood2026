@@ -26,19 +26,22 @@ def _():
 def _():
     # One call authenticates Earth Engine + the Gemini model from .env, and
     # builds the crew (orchestrator + geospatial model tools + researcher).
-    from natcap_agents import results
+    # The energy meter starts first so the session total covers setup too.
+    from natcap_agents import energy, results
     from natcap_agents.agents import build_crew
     from natcap_agents.auth import bootstrap
 
+    energy_meter = energy.session_meter()
     setup_error = None
     settings = None
     crew = None
     try:
-        settings = bootstrap()
-        crew = build_crew(settings)
+        with energy_meter.measure("Setup (auth + build crew)"):
+            settings = bootstrap()
+            crew = build_crew(settings)
     except Exception as e:  # noqa: BLE001
         setup_error = f"{type(e).__name__}: {e}"
-    return crew, results, settings, setup_error
+    return crew, energy_meter, results, settings, setup_error
 
 
 @app.cell
@@ -75,7 +78,7 @@ def _(mo):
 
 
 @app.cell
-def _(crew, mo, prompt, results, run_button, setup_error):
+def _(crew, energy_meter, mo, prompt, results, run_button, setup_error):
     # The rolling "thinking" log: streams each planning/action/tool-call step as
     # the crew produces it (mo.output.append), so this cell's output IS the live
     # sidebar. The map/stats cells below react to `board` once this cell finishes.
@@ -120,11 +123,12 @@ def _(crew, mo, prompt, results, run_button, setup_error):
         results.reset()
         mo.output.append(mo.md(f"### Running\n\n{prompt.value}"))
         mo.output.append(mo.md("---"))
-        for step in crew.run(prompt.value, stream=True):
-            mo.output.append(mo.md(_describe_step(step)))
-            mo.output.append(mo.md("---"))
-            if type(step).__name__ == "FinalAnswerStep":
-                answer = step.output
+        with energy_meter.measure(prompt.value):
+            for step in crew.run(prompt.value, stream=True):
+                mo.output.append(mo.md(_describe_step(step)))
+                mo.output.append(mo.md("---"))
+                if type(step).__name__ == "FinalAnswerStep":
+                    answer = step.output
         board = results.current()
     return (board,)
 
@@ -182,6 +186,50 @@ def _(board, mo):
         _blocks.append(mo.ui.table(_rows, selection=None))
 
     mo.vstack(_blocks)
+    return
+
+
+@app.cell
+def _(board, energy_meter, mo):
+    # Electricity used this session, refreshed after each run (`board` is only
+    # referenced so this cell reruns when the run cell finishes). It's the
+    # chip's CPU + GPU + Neural Engine + DRAM energy; "above idle" subtracts the
+    # average draw between runs — with a local backend like Ollama, that's
+    # mostly inference.
+    board
+
+    def _wh(value):
+        return None if value is None else round(value, 3)
+
+    if not energy_meter.available:
+        _energy = mo.callout(
+            mo.md(
+                "**Energy tracking is off** — this machine doesn't expose Apple Silicon's "
+                "energy counters, so runs aren't measured and no energy use is shown."
+            ),
+            kind="warn",
+        )
+    else:
+        _idle_w = energy_meter.idle_w
+        _rows = [
+            {
+                "run": _run.label if len(_run.label) <= 60 else _run.label[:60] + "…",
+                "seconds": round(_run.seconds, 1),
+                "energy (Wh)": _wh(_run.energy_wh),
+                "avg power (W)": None if _run.avg_w is None else round(_run.avg_w, 1),
+                "above idle (Wh)": _wh(_run.above_idle_wh(_idle_w)),
+            }
+            for _run in energy_meter.runs
+        ]
+        _idle = f"{_idle_w:.1f} W" if _idle_w is not None else "not measured yet"
+        _energy = mo.vstack([
+            mo.md(
+                f"**Energy** · session: **{energy_meter.session_wh:.3f} Wh** over "
+                f"{energy_meter.elapsed_s / 60:.1f} min · idle baseline: {_idle}"
+            ),
+            mo.ui.table(_rows, selection=None),
+        ])
+    _energy
     return
 
 

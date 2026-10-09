@@ -12,7 +12,8 @@
       { "position": [0, 7, 15, 7], "scrollable": true },
       { "position": [16, 0, 8, 41], "scrollable": true },
       { "position": [0, 15, 15, 16] },
-      { "position": [0, 32, 15, 9], "scrollable": true }
+      { "position": [0, 32, 15, 9], "scrollable": true },
+      { "position": [0, 41, 15, 8], "scrollable": true }
     ]
   }
 }
