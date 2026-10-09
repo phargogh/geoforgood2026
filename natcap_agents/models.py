@@ -1,21 +1,25 @@
-"""A smolagents Model that talks to Gemini through Google's own `google-genai`
-SDK instead of LiteLLM.
+"""smolagents Models for the two kinds of backend, neither going through LiteLLM:
 
-Why this exists: LiteLLM's `vertex_ai/` provider authenticates only via a
-service account (google-auth / ADC) and ignores a plain API key. Google's
-`google-genai` SDK, by contrast, supports Vertex with an API key
-(`Client(vertexai=True, api_key=...)`, "Express mode") as well as the
-service-account path. This class gives smolagents a Vertex backend that works
-with either credential.
+* `VertexAIServerModel` talks to Gemini through Google's own `google-genai`
+  SDK. LiteLLM's `vertex_ai/` provider authenticates only via a service
+  account (google-auth / ADC) and ignores a plain API key. Google's
+  `google-genai` SDK, by contrast, supports Vertex with an API key
+  (`Client(vertexai=True, api_key=...)`, "Express mode") as well as the
+  service-account path, so this gives smolagents a Vertex backend that works
+  with either credential.
+* `OllamaModel` talks to a local Ollama server over its native HTTP API.
 
-It reuses smolagents' own message/tool normalization (`_prepare_completion_kwargs`
--> OpenAI-format), then converts that to `google-genai` calls, so behavior
-matches the other smolagents models.
+Both reuse smolagents' own message/tool normalization
+(`_prepare_completion_kwargs` -> OpenAI-format), then convert that to their
+backend's calls, so behavior matches the other smolagents models.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
+from urllib.parse import urlsplit
 
+import requests
 from google import genai
 from google.genai import types
 from smolagents.models import (
@@ -192,5 +196,220 @@ class VertexAIServerModel(Model):
             content="".join(text_parts) or None,
             tool_calls=tool_calls or None,
             raw=response,
+            token_usage=token_usage,
+        )
+
+
+def _ollama_base_url(host: str) -> str:
+    """OLLAMA_HOST -> a base URL, read the way the ollama CLI reads it.
+
+    Accepts '127.0.0.1:11434', 'localhost', 'http://host:port', etc.; a missing
+    scheme means http, and a missing port on plain http means 11434.
+    """
+    parts = urlsplit(host if "://" in host else f"http://{host}")
+    netloc = parts.netloc
+    if parts.port is None and parts.scheme == "http":
+        netloc += ":11434"
+    return f"{parts.scheme}://{netloc}{parts.path.rstrip('/')}"
+
+
+def _first_stop(text: str, stops: list[str]) -> int | None:
+    """Index of the earliest stop sequence in `text`, or None if there is none."""
+    hits = [i for i in (text.find(s) for s in stops) if i != -1]
+    return min(hits) if hits else None
+
+
+class OllamaModel(Model):
+    """smolagents Model for a local Ollama server, via its native /api/chat.
+
+    The native API rather than Ollama's OpenAI-compatible /v1 endpoint, because
+    only the native one takes `num_ctx` per request: the server's default
+    context (often 4096 tokens) is smaller than the orchestrator's prompt, and
+    Ollama truncates an over-long prompt without saying so.
+
+    Stop sequences: Ollama applies `stop` to a model's thinking as well as its
+    answer, so a '</code>' or 'Observation:' drafted while thinking would end
+    the reply before the answer starts. So when the model may think, the stops
+    are matched here, against the streamed answer only, and leaving the stream
+    early closes the connection, which makes Ollama stop generating.
+
+    Args:
+        model_id: an Ollama model tag, e.g. 'qwen2.5-coder:14b'.
+        host: the server, as in OLLAMA_HOST.
+        num_ctx: context window, in tokens.
+        think: True/False to turn thinking on/off, 'low'/'medium'/'high' for
+            gpt-oss, or None to leave it at the model's default.
+        max_tokens: cap on the tokens one reply may generate, thinking
+            included. Ollama's own default is no cap, and no stop sequence
+            can end a thought that never reaches an answer.
+        temperature: sampling temperature, or None for the model's own (its
+            Modelfile's), the value its publisher tuned it with.
+        timeout: seconds to wait for each streamed chunk. The first one waits
+            for the model to load and read the whole prompt.
+    """
+
+    def __init__(
+        self,
+        model_id: str,
+        host: str = "http://localhost:11434",
+        num_ctx: int = 32768,
+        think: bool | str | None = None,
+        max_tokens: int = 8192,
+        temperature: float | None = None,
+        timeout: float = 600,
+        **kwargs,
+    ):
+        super().__init__(flatten_messages_as_text=True, model_id=model_id, **kwargs)
+        self.base_url = _ollama_base_url(host)
+        self.num_ctx = num_ctx
+        self.think = think
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.timeout = timeout
+
+        # Fail now, at setup, if the server is down or the model isn't pulled,
+        # rather than on the first step of the first run.
+        shown = self._post("/api/show", {"model": model_id}).json()
+        capabilities = shown.get("capabilities")
+        can_think = capabilities is None or "thinking" in capabilities  # None: older Ollama, unknown
+        if think and not can_think:
+            raise RuntimeError(
+                f"Ollama model '{model_id}' does not support thinking. Clear "
+                "OLLAMA_THINK in .env, or pick a model that thinks."
+            )
+        self._may_think = can_think and think is not False
+        # Without Ollama's `tools` capability a request carrying tools is
+        # refused. Leave them out: the agent's prompt already lists them, and
+        # smolagents parses a tool call written as JSON in the text.
+        self._native_tools = capabilities is None or "tools" in capabilities
+        # A request's `stop` replaces the Modelfile's instead of adding to it,
+        # so send the model's own along too (deepseek-r1 ends turns on them).
+        parameters = (line.partition(" ") for line in (shown.get("parameters") or "").splitlines())
+        self._model_stops = [v.strip().strip('"') for key, _, v in parameters if key == "stop"]
+
+    def _post(self, path: str, payload: dict, stream: bool = False) -> requests.Response:
+        try:
+            response = requests.post(
+                self.base_url + path, json=payload, stream=stream, timeout=(10, self.timeout)
+            )
+        except requests.ConnectionError as error:
+            raise RuntimeError(
+                f"Can't reach Ollama at {self.base_url}. Start it (the Ollama app, "
+                "or `ollama serve`), or point OLLAMA_HOST in .env at your server."
+            ) from error
+        if response.ok:
+            return response
+
+        try:
+            message = response.json().get("error", response.text)
+        except ValueError:
+            message = response.text
+        response.close()
+        if response.status_code == 404:
+            raise RuntimeError(
+                f"Ollama has no model '{self.model_id}' ({message}). Pull it with "
+                f"`ollama pull {self.model_id}`, or set ORCHESTRATOR_MODEL / "
+                f"WORKER_MODEL in .env to one you have: {self._local_models()}."
+            )
+        raise RuntimeError(f"Ollama model '{self.model_id}': {message}")
+
+    def _local_models(self) -> str:
+        try:
+            tags = requests.get(self.base_url + "/api/tags", timeout=10).json()
+            return ", ".join(m["name"] for m in tags.get("models", [])) or "none pulled yet"
+        except (requests.RequestException, ValueError):
+            return "see `ollama list`"
+
+    def generate(
+        self,
+        messages,
+        stop_sequences: list[str] | None = None,
+        response_format: dict[str, str] | None = None,
+        tools_to_call_from: list | None = None,
+        **kwargs,
+    ) -> ChatMessage:
+        ck = self._prepare_completion_kwargs(
+            messages=_normalize_messages(messages),
+            stop_sequences=stop_sequences,
+            tools_to_call_from=tools_to_call_from,
+        )
+        stops = ck.get("stop") or []
+
+        chat_messages = []
+        for msg in ck["messages"]:
+            content = msg.get("content")
+            if isinstance(content, list):  # safety if not flattened
+                content = "".join(part.get("text", "") for part in content)
+            chat_messages.append({"role": msg["role"], "content": content or ""})
+
+        options: dict[str, Any] = {"num_ctx": self.num_ctx, "num_predict": self.max_tokens}
+        temperature = kwargs.get("temperature", self.temperature)
+        if temperature is not None:
+            options["temperature"] = temperature
+        if stops and not self._may_think:
+            options["stop"] = self._model_stops + stops  # safe server-side: no thinking to cut short
+        payload: dict[str, Any] = {
+            "model": self.model_id,
+            "messages": chat_messages,
+            "options": options,
+            "stream": True,
+        }
+        if ck.get("tools") and self._native_tools:
+            payload["tools"] = ck["tools"]
+        if self.think is not None:
+            payload["think"] = self.think
+
+        content, thinking, raw_tool_calls, done = "", "", [], None
+        with self._post("/api/chat", payload, stream=True) as response:
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                if "error" in chunk:
+                    raise RuntimeError(f"Ollama model '{self.model_id}': {chunk['error']}")
+                message = chunk.get("message") or {}
+                thinking += message.get("thinking") or ""
+                content += message.get("content") or ""
+                raw_tool_calls += message.get("tool_calls") or []
+                cut = _first_stop(content, stops)
+                if cut is not None:
+                    content = content[:cut]
+                    break  # closing the stream stops the generation
+                if chunk.get("done"):
+                    done = chunk
+                    break
+
+        tool_calls = [
+            ChatMessageToolCall(
+                id=call.get("id") or f"call_{i}",
+                type="function",
+                function=ChatMessageToolCallFunction(
+                    name=call["function"]["name"],
+                    arguments=call["function"].get("arguments") or {},
+                ),
+            )
+            for i, call in enumerate(raw_tool_calls)
+        ]
+
+        # Only the final chunk carries the token counts, so a reply cut short
+        # by a stop matched here has none to report.
+        token_usage = (
+            TokenUsage(
+                input_tokens=done.get("prompt_eval_count", 0) or 0,
+                output_tokens=done.get("eval_count", 0) or 0,
+            )
+            if done
+            else None
+        )
+
+        return ChatMessage(
+            role=MessageRole.ASSISTANT,
+            content=content or None,
+            tool_calls=tool_calls or None,
+            raw={
+                **(done or {}),
+                "message": {"role": "assistant", "content": content,
+                            "thinking": thinking, "tool_calls": raw_tool_calls},
+            },
             token_usage=token_usage,
         )

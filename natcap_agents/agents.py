@@ -1,4 +1,4 @@
-"""Assemble the natcap geospatial crew on Gemini (via google-genai).
+"""Assemble the natcap geospatial crew on Gemini (via google-genai) or Ollama.
 
     Orchestrator (manager CodeAgent)
       └─ Researcher (ToolCallingAgent) — external facts via web search
