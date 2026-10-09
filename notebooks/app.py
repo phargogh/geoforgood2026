@@ -202,7 +202,13 @@ def _(board, energy_meter, mo):
         return None if value is None else round(value, 3)
 
     if not energy_meter.available:
-        _energy = mo.md("_Energy: no energy counters on this machine (needs Apple Silicon)._")
+        _energy = mo.callout(
+            mo.md(
+                "**Energy tracking is off** — this machine doesn't expose Apple Silicon's "
+                "energy counters, so runs aren't measured and no energy use is shown."
+            ),
+            kind="warn",
+        )
     else:
         _idle_w = energy_meter.idle_w
         _rows = [

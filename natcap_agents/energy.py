@@ -13,7 +13,8 @@ With a local model backend (e.g. Ollama, which runs on the GPU) the
 above-idle figure is mostly inference. Remote inference (Gemini) and Earth
 Engine compute run on Google's servers and don't show up here; neither do
 the display, SSD, Wi-Fi or charger losses — this is the chip and its memory.
-Elsewhere (Intel Macs, Linux) the meter reports `available == False`.
+Elsewhere (Intel Macs, Linux) the meter reports `available == False` and
+`measure()` is a no-op.
 
 Usage:
     from natcap_agents import energy
@@ -29,7 +30,7 @@ import ctypes.util
 import functools
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
@@ -137,17 +138,19 @@ class Run:
 
     @property
     def energy_wh(self) -> float:
-        return self.joules / 3600
+        return self.joules / 3600  # J -> Wh: 1 Wh is 1 W for 3600 s, i.e. 3600 J
 
     @property
     def avg_w(self) -> float | None:
+        # 1 W = 1 J/s, so average power is the energy divided by the elapsed time.
         return self.joules / self.seconds if self.seconds else None
 
     def above_idle_wh(self, idle_w: float | None) -> float | None:
         """Energy beyond what the chip would have drawn idling for as long."""
         if idle_w is None:
             return None
-        return (self.joules - idle_w * self.seconds) / 3600
+        idle_joules = idle_w * self.seconds  # W × s = J
+        return (self.joules - idle_joules) / 3600  # J -> Wh (1 Wh = 3600 J)
 
 
 class EnergyMeter:
@@ -158,9 +161,18 @@ class EnergyMeter:
         self.available = self._start_j is not None
         self.runs: list[Run] = []
 
+    def measure(self, label: str) -> AbstractContextManager[Run]:
+        """Attribute the energy used inside this block to a new Run.
+
+        Without energy counters (not Apple Silicon) this is a no-op: the block
+        runs unmeasured, and the Run it yields stays at zero and isn't recorded.
+        """
+        if not self.available:
+            return nullcontext(Run(label))
+        return self._measure(label)
+
     @contextmanager
-    def measure(self, label: str) -> Iterator[Run]:
-        """Attribute the energy used inside this block to a new Run."""
+    def _measure(self, label: str) -> Iterator[Run]:
         run = Run(label)
         start_t, start_j = time.monotonic(), self._read()
         try:
@@ -183,7 +195,7 @@ class EnergyMeter:
 
     @property
     def session_wh(self) -> float:
-        return self.session_joules / 3600
+        return self.session_joules / 3600  # J -> Wh (1 Wh = 3600 J)
 
     @property
     def idle_w(self) -> float | None:

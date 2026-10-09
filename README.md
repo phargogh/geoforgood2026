@@ -61,7 +61,8 @@ apps running at the same time are included, so **above idle** subtracts the
 average draw measured between runs; with a local backend such as Ollama that
 difference is mostly inference. Not counted: the display, SSD, Wi-Fi, charger
 losses, and anything on Google's servers (Gemini, Earth Engine). On Intel
-Macs and Linux the panel says the counters aren't available. Outside the app:
+Macs and Linux there are no counters to read: `measure()` becomes a no-op and
+the panel shows a warning instead. Outside the app:
 
 ```python
 from natcap_agents import energy
