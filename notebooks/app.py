@@ -24,8 +24,8 @@ def _():
 
 @app.cell
 def _():
-    # One call authenticates Earth Engine + the Gemini model from .env, and
-    # builds the crew (orchestrator + geospatial model tools + researcher).
+    # One call authenticates Earth Engine + the models (Gemini or Ollama) from
+    # .env, and builds the crew (orchestrator + geospatial model tools + researcher).
     # The energy meter starts first so the session total covers setup too.
     from natcap_agents import energy, results
     from natcap_agents.agents import build_crew
@@ -57,7 +57,10 @@ def _(mo, settings, setup_error):
         )
     else:
         _status = mo.callout(
-            mo.md(f"**Project:** `{settings.project_id}` · **backend:** `{settings.llm_backend}`"),
+            mo.md(
+                f"**Project:** `{settings.project_id}` · **backend:** `{settings.llm_backend}`"
+                f" · **models:** `{settings.orchestrator_model}` / `{settings.worker_model}`"
+            ),
             kind="success",
         )
     mo.vstack([mo.md("## NatCap geospatial agent crew"), _status])

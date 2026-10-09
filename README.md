@@ -3,8 +3,8 @@
 ## Agent sandbox
 
 A **smolagents** crew running on Gemini via Google's `google-genai` SDK
-(Vertex API key, Vertex service account, or the Gemini API), backed by
-**Google Earth Engine** for compute. Forked from
+(Vertex API key, Vertex service account, or the Gemini API) or on local
+models via **Ollama**, backed by **Google Earth Engine** for compute. Forked from
 [natcap/ee-agent-sandbox](../ee-agent-sandbox)'s infra.
 
 ### The crew
@@ -112,19 +112,55 @@ headless run.
 
 The models use, in order:
 
+- `LLM_BACKEND=ollama` → a local **Ollama** server; no key or service account
+  for the models (see below).
 - `VERTEX_API_KEY` set → Vertex **Express mode** with that key (no service
   account needed for the models).
 - else `LLM_BACKEND=gemini` + `GEMINI_API_KEY` → Gemini Developer API.
 - else → Vertex via the same credential Earth Engine uses (service-account key
   if present, otherwise ADC).
 
+### Local models with Ollama (`.env`)
+
+Set `LLM_BACKEND=ollama` and name the models by their Ollama tags:
+
+```bash
+LLM_BACKEND=ollama
+ORCHESTRATOR_MODEL=qwen2.5-coder:14b
+WORKER_MODEL=                     # blank: the researcher reuses the orchestrator's model
+```
+
+`ORCHESTRATOR_MODEL` is required (there is no sensible default for what you
+have pulled), and a blank `WORKER_MODEL` reuses it, so only one model sits in
+memory. Earth Engine still needs its Google credential as above; only the
+models move off Google.
+
+- `OLLAMA_HOST` — the server, default `http://localhost:11434` (same syntax as
+  the ollama CLI).
+- `OLLAMA_NUM_CTX` — the context window, default `32768`. It's sent with every
+  request because Ollama's own default (often 4096) is smaller than the
+  orchestrator's prompt, and Ollama cuts an over-long prompt off silently.
+- `OLLAMA_THINK` — `true`/`false` for models that think (qwen3, deepseek-r1,
+  gemma4, ...), `low`/`medium`/`high` for gpt-oss, or blank for the model's
+  default. Thinking is slower and uses more energy.
+
+The model is checked when the crew is built, so a server that isn't running,
+a tag that isn't pulled (`ollama pull <tag>`), or `OLLAMA_THINK` on a model
+that can't think fails at setup with the fix in the message. Ollama would also
+apply stop sequences to a model's thinking and end the reply before the answer
+starts, so for models that may think, `OllamaModel` matches them against the
+streamed answer itself. Each reply is capped at 8192 tokens, thinking included:
+Ollama's default is no cap, and a thinking model can loop without ever
+reaching an answer. Sampling (temperature etc.) is left at each model's own
+defaults, the values its publisher tuned it with.
+
 ### Layout
 
 ```
 natcap_agents/
   config.py       # .env -> Settings
-  auth.py         # bootstrap(): init EE (SA key or ADC) + build the Gemini model
-  models.py       # VertexAIServerModel (google-genai; Vertex key / SA / Gemini API)
+  auth.py         # bootstrap(): init EE (SA key or ADC) + build the models
+  models.py       # VertexAIServerModel (google-genai; Vertex key / SA / Gemini API), OllamaModel
   safety.py       # authorized imports for the code-executing orchestrator
   results.py      # shared board: model tools publish layers/stats here
   energy.py       # session_meter(): electricity used, per run and per session

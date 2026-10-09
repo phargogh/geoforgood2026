@@ -16,7 +16,8 @@ cat <<'MSG'
 
 Done. Next:
   1. (optional) put a service-account key at  secrets/sa-key.json
-  2. Edit .env (project id; VERTEX_API_KEY or GEMINI_API_KEY if using one)
+  2. Edit .env (project id; VERTEX_API_KEY or GEMINI_API_KEY if using one,
+     or LLM_BACKEND=ollama + ORCHESTRATOR_MODEL for local models)
   3. source .venv/bin/activate
   4. python -c "from natcap_agents.agents import build_crew; build_crew().run('hello')"
 MSG

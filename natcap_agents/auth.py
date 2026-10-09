@@ -1,5 +1,5 @@
 """Single place that turns one GCP credential into working Earth Engine
-*and* Vertex Gemini access.
+*and* Vertex Gemini access (or hands the models to a local Ollama server).
 
 Design goal: one credential, zero interactive prompts. Two credentials work
 here, and the same one authorizes both services:
@@ -10,6 +10,8 @@ here, and the same one authorizes both services:
     Colab, where there is no key file to ship.
 
 Whichever is present, a single bootstrap() call gets everything working.
+With LLM_BACKEND=ollama the models need no Google credential at all; Earth
+Engine still does.
 """
 from __future__ import annotations
 
@@ -17,9 +19,10 @@ import os
 from pathlib import Path
 
 import ee
+from smolagents.models import Model
 
-from .config import Settings, load_settings
-from .models import VertexAIServerModel
+from .config import LLM_BACKENDS, Settings, load_settings
+from .models import OllamaModel, VertexAIServerModel
 
 _EE_INITIALIZED = False
 
@@ -115,17 +118,26 @@ def init_earth_engine(settings: Settings | None = None) -> None:
     _EE_INITIALIZED = True
 
 
-def make_model(model_id: str, settings: Settings | None = None, **kwargs) -> VertexAIServerModel:
-    """Build a Gemini model via Google's google-genai SDK (not LiteLLM).
+def make_model(model_id: str, settings: Settings | None = None, **kwargs) -> Model:
+    """Build a model on whichever backend LLM_BACKEND names (not via LiteLLM).
 
-    Auth, selected by LLM_BACKEND and any API key in .env:
+    Selected by LLM_BACKEND and any API key in .env:
       - 'vertex' (default) + an API key (VERTEX_API_KEY): Vertex **Express mode** —
         authenticates with the API key, no service account needed.
       - 'vertex' + no API key: Vertex via the **service account** (ADC /
         GOOGLE_APPLICATION_CREDENTIALS, forced absolute) + project/location.
       - 'gemini' + an API key: the **Gemini Developer API** with the key.
+      - 'ollama': a local **Ollama** server at OLLAMA_HOST; model_id is an
+        Ollama tag. No API key or service account.
     """
     settings = settings or load_settings()
+
+    if settings.llm_backend == "ollama":
+        return OllamaModel(
+            model_id, host=settings.ollama_host, num_ctx=settings.ollama_num_ctx,
+            think=settings.ollama_think, **kwargs,
+        )
+
     api_key = settings.vertex_api_key or settings.gemini_api_key
 
     if settings.llm_backend == "gemini":
@@ -136,25 +148,30 @@ def make_model(model_id: str, settings: Settings | None = None, **kwargs) -> Ver
             )
         return VertexAIServerModel(model_id, api_key=api_key, use_vertex=False, **kwargs)
 
-    # Vertex AI.
-    if api_key:
-        # Express mode: API key straight to Vertex.
-        return VertexAIServerModel(model_id, api_key=api_key, use_vertex=True, **kwargs)
+    if settings.llm_backend == "vertex":
+        if api_key:
+            # Express mode: API key straight to Vertex.
+            return VertexAIServerModel(model_id, api_key=api_key, use_vertex=True, **kwargs)
 
-    # Service-account / ADC path.
-    _apply_gcp_credentials(settings)  # key file if present, else ADC
-    return VertexAIServerModel(
-        model_id, project=settings.project_id, location=settings.vertex_location,
-        use_vertex=True, **kwargs,
+        # Service-account / ADC path.
+        _apply_gcp_credentials(settings)  # key file if present, else ADC
+        return VertexAIServerModel(
+            model_id, project=settings.project_id, location=settings.vertex_location,
+            use_vertex=True, **kwargs,
+        )
+
+    raise RuntimeError(
+        f"LLM_BACKEND={settings.llm_backend!r} is not supported. Use one of: "
+        + ", ".join(LLM_BACKENDS) + "."
     )
 
 
-def orchestrator_model(settings: Settings | None = None, **kwargs) -> VertexAIServerModel:
+def orchestrator_model(settings: Settings | None = None, **kwargs) -> Model:
     settings = settings or load_settings()
     return make_model(settings.orchestrator_model, settings, **kwargs)
 
 
-def worker_model(settings: Settings | None = None, **kwargs) -> VertexAIServerModel:
+def worker_model(settings: Settings | None = None, **kwargs) -> Model:
     settings = settings or load_settings()
     return make_model(settings.worker_model, settings, **kwargs)
 
